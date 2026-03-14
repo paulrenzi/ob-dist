@@ -4,7 +4,7 @@
 #
 # Paste into a Batocera terminal or SSH session:
 #
-#   curl -sL https://raw.githubusercontent.com/paulrenzi/ob-dist/main/install.sh | bash
+#   curl -sL https://tinyurl.com/2ck7b59j | bash
 #
 # =============================================================================
 
