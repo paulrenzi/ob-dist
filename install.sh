@@ -72,10 +72,12 @@ pkill -f netplay-server.py 2>/dev/null || true
 pkill -f rom-checker.sh 2>/dev/null || true
 pkill -f media-scraper.py 2>/dev/null || true
 pkill -f cabinet-ui.py 2>/dev/null || true
+pkill -f netplay-cores.sh 2>/dev/null || true
+pkill -f setup.sh 2>/dev/null || true
 sleep 2
 rm -f /tmp/netplay_bootscan.lock \
       /tmp/outbreak-media-scrape.lock /tmp/outbreak-media-scraper.lock \
-      /tmp/outbreak-retroarch.lock 2>/dev/null || true
+      /tmp/outbreak-retroarch.lock /tmp/outbreak_download.lock 2>/dev/null || true
 # Force a fresh ROM scan when the version changes
 _PREV_VER=""
 [ -f "$INSTALL_DIR/.version" ] && _PREV_VER=$(cat "$INSTALL_DIR/.version" 2>/dev/null)
