@@ -83,6 +83,8 @@ _PREV_VER=""
 [ -f "$INSTALL_DIR/.version" ] && _PREV_VER=$(cat "$INSTALL_DIR/.version" 2>/dev/null)
 if [ "$_PREV_VER" != "${LATEST_TAG:-}" ]; then
     rm -f /tmp/rom_scan_last_run 2>/dev/null || true
+    # Clear MAME blacklist on version change (download source may have changed)
+    rm -f "$INSTALL_DIR/.mame_blacklist" 2>/dev/null || true
 fi
 echo "Previous processes stopped and temporary files cleared."
 
