@@ -88,11 +88,18 @@ if [ "$_PREV_VER" != "${LATEST_TAG:-}" ]; then
 fi
 echo "Previous processes stopped and temporary files cleared."
 
-# Copy scripts and UI — preserve existing config
-rsync -a --exclude="config.cfg" "$EXTRACTED/scripts/" "$INSTALL_DIR/scripts/" 2>/dev/null || \
+# Copy scripts and UI — preserve existing config, remove stale files
+rsync -a --delete --exclude="config.cfg" --exclude="__pycache__/" \
+    "$EXTRACTED/scripts/" "$INSTALL_DIR/scripts/" 2>/dev/null || \
     cp -r "$EXTRACTED/scripts/." "$INSTALL_DIR/scripts/"
-rsync -a "$EXTRACTED/ui/"       "$INSTALL_DIR/ui/"     2>/dev/null || \
+rsync -a --delete "$EXTRACTED/ui/" "$INSTALL_DIR/ui/" 2>/dev/null || \
     cp -r "$EXTRACTED/ui/."     "$INSTALL_DIR/ui/"
+
+# Copy VERSION file
+cp "$EXTRACTED/VERSION" "$INSTALL_DIR/VERSION" 2>/dev/null || true
+
+# Clean up legacy directories no longer used
+rm -rf "$INSTALL_DIR/dats" 2>/dev/null || true
 
 chmod +x "$INSTALL_DIR/scripts/"*.sh "$INSTALL_DIR/scripts/service" 2>/dev/null || true
 
