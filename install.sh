@@ -13,25 +13,29 @@ set -e
 DIST_REPO="paulrenzi/ob-dist"
 INSTALL_DIR="/userdata/system/netplay-arcade"
 TMP_DIR=$(mktemp -d)
+LOG="/tmp/outbreak-install.log"
+MASTER_PID_FILE="/tmp/outbreak_master.pid"
 
-echo ""
-echo "=== Outbreak installer ==="
-echo ""
+log() { echo "[$(date '+%H:%M:%S')] $1" | tee -a "$LOG"; }
+
+log ""
+log "=== Outbreak installer ==="
+log ""
 
 # ── Batocera version check ─────────────────────────────────────────────────────
 _BATOCERA_VER_FILE="/usr/share/batocera/batocera.version"
 if [ -f "$_BATOCERA_VER_FILE" ]; then
     _BATOCERA_VER=$(cat "$_BATOCERA_VER_FILE" | tr -d '[:alpha:][:space:]' | cut -d'.' -f1)
     if [ -n "$_BATOCERA_VER" ] && [ "$_BATOCERA_VER" -lt 38 ] 2>/dev/null; then
-        echo "ERROR: Outbreak requires Batocera v38 or later."
-        echo "       Detected: $(cat "$_BATOCERA_VER_FILE")"
-        echo "       Please update Batocera first: batocera-upgrade"
+        log "ERROR: Outbreak requires Batocera v38 or later."
+        log "       Detected: $(cat "$_BATOCERA_VER_FILE")"
+        log "       Please update Batocera first: batocera-upgrade"
         rm -rf "$TMP_DIR"
         exit 1
     fi
 elif [ ! -d "/userdata" ]; then
-    echo "WARNING: This doesn't look like a Batocera system (/userdata not found)."
-    echo "         Continuing anyway — some features may not work."
+    log "WARNING: This doesn't look like a Batocera system (/userdata not found)."
+    log "         Continuing anyway — some features may not work."
 fi
 
 # ── Resolve latest release from ob-dist ───────────────────────────────────────
@@ -39,71 +43,139 @@ LATEST_TAG=$(curl -sf "https://api.github.com/repos/$DIST_REPO/releases/latest" 
     | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
 
 if [ -z "$LATEST_TAG" ]; then
-    echo "ERROR: Could not find latest release."
+    log "ERROR: Could not find latest release."
     rm -rf "$TMP_DIR"
     exit 1
 fi
-echo "Installing Outbreak $LATEST_TAG"
+log "Installing Outbreak $LATEST_TAG"
 
 # ── Download tarball from release assets ──────────────────────────────────────
 TARBALL_URL="https://github.com/$DIST_REPO/releases/download/$LATEST_TAG/outbreak-${LATEST_TAG}.tar.gz"
-echo "Downloading..."
+log "Downloading from $TARBALL_URL ..."
 curl -sfL "$TARBALL_URL" -o "$TMP_DIR/outbreak.tar.gz" || {
-    echo "ERROR: Download failed. Check your internet connection."
+    log "ERROR: Download failed. Check your internet connection."
     rm -rf "$TMP_DIR"
     exit 1
 }
+log "Download complete ($(du -h "$TMP_DIR/outbreak.tar.gz" | cut -f1))"
 
 # ── Extract ───────────────────────────────────────────────────────────────────
-echo "Extracting..."
+log "Extracting..."
 mkdir -p "$INSTALL_DIR"
 tar xzf "$TMP_DIR/outbreak.tar.gz" -C "$TMP_DIR"
 
 EXTRACTED=$(find "$TMP_DIR" -maxdepth 1 -type d -name "*Outbreak*" | head -1)
 if [ -z "$EXTRACTED" ]; then
-    echo "ERROR: Could not find extracted directory."
+    log "ERROR: Could not find extracted directory."
     rm -rf "$TMP_DIR"
     exit 1
 fi
 
 # ── Stop running server and clear stale state ─────────────────────────────────
-echo "Stopping any existing Outbreak processes..."
-pkill -f netplay-server.py 2>/dev/null || true
-pkill -f rom-checker.sh 2>/dev/null || true
-pkill -f media-scraper.py 2>/dev/null || true
-pkill -f cabinet-ui.py 2>/dev/null || true
-pkill -f netplay-cores.sh 2>/dev/null || true
-pkill -f setup.sh 2>/dev/null || true
-sleep 2
-rm -f /tmp/netplay_bootscan.lock \
+log "Stopping any existing Outbreak processes..."
+
+# Kill the master daemon properly via PID file (matches boot.sh _kill_master)
+if [ -f "$MASTER_PID_FILE" ]; then
+    _old_pid=$(cat "$MASTER_PID_FILE" 2>/dev/null)
+    if [ -n "$_old_pid" ] && kill -0 "$_old_pid" 2>/dev/null; then
+        log "  Sending SIGTERM to master daemon (PID $_old_pid)..."
+        kill "$_old_pid" 2>/dev/null
+        _wait=0
+        while kill -0 "$_old_pid" 2>/dev/null && [ $_wait -lt 6 ]; do
+            sleep 0.5; ((_wait++))
+        done
+        if kill -0 "$_old_pid" 2>/dev/null; then
+            log "  SIGTERM didn't stop it — sending SIGKILL..."
+            kill -9 "$_old_pid" 2>/dev/null
+            sleep 1
+        fi
+        if kill -0 "$_old_pid" 2>/dev/null; then
+            log "  WARNING: PID $_old_pid still alive after SIGKILL"
+        else
+            log "  Master daemon stopped"
+        fi
+    else
+        log "  PID file exists but process $_old_pid not running"
+    fi
+    rm -f "$MASTER_PID_FILE"
+fi
+
+# Mop up any stragglers not covered by the PID file
+for _pat in rom-checker.sh media-scraper.py cabinet-ui.py netplay-cores.sh; do
+    pkill -f "$_pat" 2>/dev/null || true
+done
+sleep 1
+
+# Verify no old server is still running (no pgrep on Batocera, use pkill -0)
+if pkill -0 -f netplay-server.py 2>/dev/null; then
+    log "  WARNING: old server still alive after kill — sending SIGKILL to all..."
+    pkill -9 -f netplay-server.py 2>/dev/null || true
+    sleep 1
+fi
+
+# Clear lock files and PID file
+rm -f /tmp/netplay_bootscan.lock /tmp/outbreak_boot.lock \
       /tmp/outbreak-media-scrape.lock /tmp/outbreak-media-scraper.lock \
-      /tmp/outbreak-retroarch.lock /tmp/outbreak_download.lock 2>/dev/null || true
+      /tmp/outbreak-retroarch.lock /tmp/outbreak_download.lock \
+      "$MASTER_PID_FILE" 2>/dev/null || true
+
 # Force a fresh ROM scan when the version changes
 _PREV_VER=""
 [ -f "$INSTALL_DIR/.version" ] && _PREV_VER=$(cat "$INSTALL_DIR/.version" 2>/dev/null)
 if [ "$_PREV_VER" != "${LATEST_TAG:-}" ]; then
+    log "  Version change ($_PREV_VER → $LATEST_TAG) — clearing scan cache and blacklist"
     rm -f /tmp/rom_scan_last_run 2>/dev/null || true
-    # Clear MAME blacklist on version change (download source may have changed)
     rm -f "$INSTALL_DIR/.mame_blacklist" 2>/dev/null || true
 fi
-echo "Previous processes stopped and temporary files cleared."
+log "Previous processes stopped and state cleared."
 
-# Copy scripts and UI — preserve existing config, remove stale files
-rsync -a --delete --exclude="config.cfg" --exclude="__pycache__/" \
-    "$EXTRACTED/scripts/" "$INSTALL_DIR/scripts/" 2>/dev/null || \
+# ── Copy scripts and UI — preserve existing config ───────────────────────────
+log "Copying files..."
+rsync -a --exclude="config.cfg" "$EXTRACTED/scripts/" "$INSTALL_DIR/scripts/" 2>/dev/null || \
     cp -r "$EXTRACTED/scripts/." "$INSTALL_DIR/scripts/"
-rsync -a --delete "$EXTRACTED/ui/" "$INSTALL_DIR/ui/" 2>/dev/null || \
+rsync -a "$EXTRACTED/ui/"       "$INSTALL_DIR/ui/"     2>/dev/null || \
     cp -r "$EXTRACTED/ui/."     "$INSTALL_DIR/ui/"
-
-# Copy VERSION file
-cp "$EXTRACTED/VERSION" "$INSTALL_DIR/VERSION" 2>/dev/null || true
-
-# Clean up legacy directories no longer used
-rm -rf "$INSTALL_DIR/dats" 2>/dev/null || true
 
 chmod +x "$INSTALL_DIR/scripts/"*.sh "$INSTALL_DIR/scripts/service" 2>/dev/null || true
 
 rm -rf "$TMP_DIR"
 
-# ── Run installer ─────────────────────────────────────────────────────────────
+# ── Write version stamp and start server ─────────────────────────────────────
+echo "$LATEST_TAG" > "$INSTALL_DIR/VERSION"
+echo "$LATEST_TAG" > "$INSTALL_DIR/.version"
+log "Version stamped: $LATEST_TAG"
+
+# Run setup (per-core overrides, ES system entries, etc.) then boot the daemon
+log "Starting boot.sh install..."
 bash "$INSTALL_DIR/scripts/boot.sh" install "${LATEST_TAG:-}"
+
+# Verify the new daemon is running
+sleep 3
+if [ -f "$MASTER_PID_FILE" ]; then
+    _new_pid=$(cat "$MASTER_PID_FILE" 2>/dev/null)
+    if [ -n "$_new_pid" ] && kill -0 "$_new_pid" 2>/dev/null; then
+        log "Outbreak $LATEST_TAG running (PID $_new_pid)"
+    else
+        log "WARNING: PID file exists but process not running. Retrying boot..."
+        rm -f "$MASTER_PID_FILE" /tmp/outbreak_boot.lock
+        bash "$INSTALL_DIR/scripts/boot.sh" boot >> "$INSTALL_DIR/logs/server.log" 2>&1 </dev/null &
+        sleep 3
+        if [ -f "$MASTER_PID_FILE" ] && kill -0 "$(cat "$MASTER_PID_FILE")" 2>/dev/null; then
+            log "Outbreak $LATEST_TAG running (PID $(cat "$MASTER_PID_FILE"))"
+        else
+            log "ERROR: Server failed to start. Check $INSTALL_DIR/logs/server.log"
+        fi
+    fi
+else
+    log "WARNING: No PID file after install. Retrying boot..."
+    rm -f /tmp/outbreak_boot.lock
+    bash "$INSTALL_DIR/scripts/boot.sh" boot >> "$INSTALL_DIR/logs/server.log" 2>&1 </dev/null &
+    sleep 3
+    if [ -f "$MASTER_PID_FILE" ] && kill -0 "$(cat "$MASTER_PID_FILE")" 2>/dev/null; then
+        log "Outbreak $LATEST_TAG running (PID $(cat "$MASTER_PID_FILE"))"
+    else
+        log "ERROR: Server failed to start. Check $INSTALL_DIR/logs/server.log"
+    fi
+fi
+
+log "Install log saved to $LOG"
