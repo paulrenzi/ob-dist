@@ -129,14 +129,41 @@ if [ "$_PREV_VER" != "${LATEST_TAG:-}" ]; then
 fi
 log "Previous processes stopped and state cleared."
 
-# ── Copy scripts and UI — preserve existing config ───────────────────────────
+# ── Copy ALL tarball contents — preserve existing config ─────────────────────
+# Future-proof: any new file in the tarball automatically lands on the console.
+# Only config.cfg and dev-only files are excluded.
 log "Copying files..."
-rsync -a --exclude="config.cfg" "$EXTRACTED/scripts/" "$INSTALL_DIR/scripts/" 2>/dev/null || \
-    cp -r "$EXTRACTED/scripts/." "$INSTALL_DIR/scripts/"
-rsync -a "$EXTRACTED/ui/"       "$INSTALL_DIR/ui/"     2>/dev/null || \
-    cp -r "$EXTRACTED/ui/."     "$INSTALL_DIR/ui/"
+rsync -a \
+    --exclude="config.cfg" \
+    --exclude=".git" \
+    --exclude="tests/" \
+    --exclude="relay/" \
+    --exclude="*.md" \
+    --exclude="Dockerfile" \
+    --exclude="docker-compose.yml" \
+    --exclude="pyproject.toml" \
+    --exclude=".github/" \
+    --exclude="patches/" \
+    "$EXTRACTED/" "$INSTALL_DIR/" 2>/dev/null || {
+    # Fallback if rsync unavailable: backup config, copy all, restore config
+    log "  rsync not available — using cp fallback"
+    [ -f "$INSTALL_DIR/config.cfg" ] && cp "$INSTALL_DIR/config.cfg" /tmp/outbreak-config-backup.cfg
+    cp -r "$EXTRACTED/." "$INSTALL_DIR/"
+    [ -f /tmp/outbreak-config-backup.cfg ] && cp /tmp/outbreak-config-backup.cfg "$INSTALL_DIR/config.cfg"
+    # Remove dev-only files that shouldn't be on consoles
+    rm -f "$INSTALL_DIR/Dockerfile" "$INSTALL_DIR/docker-compose.yml" "$INSTALL_DIR/pyproject.toml" 2>/dev/null
+    rm -rf "$INSTALL_DIR/.github" "$INSTALL_DIR/tests" "$INSTALL_DIR/relay" "$INSTALL_DIR/patches" 2>/dev/null
+    rm -f "$INSTALL_DIR/"*.md 2>/dev/null
+}
 
 chmod +x "$INSTALL_DIR/scripts/"*.sh "$INSTALL_DIR/scripts/service" 2>/dev/null || true
+
+# Post-copy verification — warn if expected files are missing
+for _check_file in scripts/netplay-server.py scripts/boot.sh ui/index.html; do
+    [ ! -f "$INSTALL_DIR/$_check_file" ] && log "WARNING: $_check_file missing after install"
+done
+[ -f "$EXTRACTED/n64_compat.json" ] && [ ! -f "$INSTALL_DIR/n64_compat.json" ] && \
+    log "WARNING: n64_compat.json missing after install"
 
 rm -rf "$TMP_DIR"
 
