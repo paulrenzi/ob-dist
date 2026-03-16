@@ -38,9 +38,25 @@ elif [ ! -d "/userdata" ]; then
     log "         Continuing anyway — some features may not work."
 fi
 
-# ── Resolve latest release from ob-dist ───────────────────────────────────────
-LATEST_TAG=$(curl -sf "https://api.github.com/repos/$DIST_REPO/releases/latest" \
-    | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+# ── Resolve latest VERSIONED release from ob-dist ─────────────────────────────
+# Only match v* tags — prevents picking up non-version releases like
+# "standalone-x86_64" or "core-channel-x86_64" which are asset-only.
+LATEST_TAG=$(curl -sf "https://api.github.com/repos/$DIST_REPO/releases" \
+    | python3 -c "
+import json, sys
+releases = json.load(sys.stdin)
+for r in releases:
+    tag = r.get('tag_name', '')
+    if tag.startswith('v') and not r.get('draft', False):
+        print(tag)
+        break
+" 2>/dev/null)
+
+if [ -z "$LATEST_TAG" ]; then
+    # Fallback to /releases/latest if python3 parsing fails
+    LATEST_TAG=$(curl -sf "https://api.github.com/repos/$DIST_REPO/releases/latest" \
+        | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+fi
 
 if [ -z "$LATEST_TAG" ]; then
     log "ERROR: Could not find latest release."
@@ -71,21 +87,39 @@ if [ -z "$EXTRACTED" ]; then
     exit 1
 fi
 
-# ── Stop running server and clear stale state ─────────────────────────────────
+# ── Strip CRLF from all text files (Windows git protection) ──────────────────
+# This is the CRITICAL fix: Windows git autocrlf commits \r\n which makes
+# every .sh and .py file fail on Batocera with "$'\r': command not found".
+# Strip unconditionally — it's idempotent and costs <1 second.
+log "Fixing line endings..."
+find "$EXTRACTED" -type f \( -name "*.sh" -o -name "*.py" -o -name "*.json" \
+    -o -name "*.cfg" -o -name "*.xml" -o -name "*.html" -o -name "VERSION" \) \
+    -exec sed -i 's/\r$//' {} + 2>/dev/null || true
+
+# ── Stop running server — kill CHILDREN FIRST, then parent ────────────────────
+# Critical fix: the old installer killed the parent first, which blocked on
+# subprocess.run() calls (wget, rom-checker) that could take minutes to finish.
+# Kill children first so the parent's subprocess.run() returns immediately.
 log "Stopping any existing Outbreak processes..."
 
-# Kill the master daemon properly via PID file (matches boot.sh _kill_master)
+# Step 1: Kill child processes FIRST (wget, rom-checker, scraper, etc.)
+for _pat in "wget.*archive.org" "wget.*github" rom-checker.sh media-scraper.py \
+            cabinet-ui.py netplay-cores.sh gopher64; do
+    pkill -9 -f "$_pat" 2>/dev/null || true
+done
+sleep 0.5
+
+# Step 2: Now kill the master daemon (subprocess.run calls will have returned)
 if [ -f "$MASTER_PID_FILE" ]; then
     _old_pid=$(cat "$MASTER_PID_FILE" 2>/dev/null)
     if [ -n "$_old_pid" ] && kill -0 "$_old_pid" 2>/dev/null; then
-        log "  Sending SIGTERM to master daemon (PID $_old_pid)..."
+        log "  Killing master daemon (PID $_old_pid)..."
         kill "$_old_pid" 2>/dev/null
         _wait=0
         while kill -0 "$_old_pid" 2>/dev/null && [ $_wait -lt 6 ]; do
-            sleep 0.5; ((_wait++))
+            sleep 0.5; _wait=$((_wait + 1))
         done
         if kill -0 "$_old_pid" 2>/dev/null; then
-            log "  SIGTERM didn't stop it — sending SIGKILL..."
             kill -9 "$_old_pid" 2>/dev/null
             sleep 1
         fi
@@ -95,44 +129,52 @@ if [ -f "$MASTER_PID_FILE" ]; then
             log "  Master daemon stopped"
         fi
     else
-        log "  PID file exists but process $_old_pid not running"
+        log "  No running daemon found"
     fi
     rm -f "$MASTER_PID_FILE"
 fi
 
-# Mop up any stragglers not covered by the PID file
-for _pat in rom-checker.sh media-scraper.py cabinet-ui.py netplay-cores.sh; do
-    pkill -f "$_pat" 2>/dev/null || true
-done
-sleep 1
+# Step 3: Final sweep — kill any remaining Python server processes
+pkill -9 -f netplay-server.py 2>/dev/null || true
+sleep 0.5
 
-# Verify no old server is still running (no pgrep on Batocera, use pkill -0)
-if pkill -0 -f netplay-server.py 2>/dev/null; then
-    log "  WARNING: old server still alive after kill — sending SIGKILL to all..."
-    pkill -9 -f netplay-server.py 2>/dev/null || true
-    sleep 1
-fi
-
-# Clear lock files and PID file
+# Clear ALL lock files
 rm -f /tmp/netplay_bootscan.lock /tmp/outbreak_boot.lock \
       /tmp/outbreak-media-scrape.lock /tmp/outbreak-media-scraper.lock \
       /tmp/outbreak-retroarch.lock /tmp/outbreak_download.lock \
+      /tmp/outbreak_joining.flag \
       "$MASTER_PID_FILE" 2>/dev/null || true
 
-# Force a fresh ROM scan when the version changes
+log "Previous processes stopped."
+
+# ── Force fresh ROM scan on version change (preserves ROM files) ──────────────
 _PREV_VER=""
 [ -f "$INSTALL_DIR/.version" ] && _PREV_VER=$(cat "$INSTALL_DIR/.version" 2>/dev/null)
 if [ "$_PREV_VER" != "${LATEST_TAG:-}" ]; then
-    log "  Version change ($_PREV_VER → $LATEST_TAG) — clearing scan cache and blacklist"
+    log "  Version change ($_PREV_VER -> $LATEST_TAG) — clearing scan cache"
     rm -f /tmp/rom_scan_last_run 2>/dev/null || true
-    rm -f "$INSTALL_DIR/.mame_blacklist" 2>/dev/null || true
+    # NOTE: .mame_blacklist and .console_blacklist are NOT cleared — they
+    # represent persistent IA unavailability, not version-specific state.
+    # NOTE: ROM files and pack markers are NEVER touched by the installer.
 fi
-log "Previous processes stopped and state cleared."
+
+# ── Backup current install for rollback ───────────────────────────────────────
+BACKUP_DIR="/tmp/outbreak-rollback"
+if [ -d "$INSTALL_DIR/scripts" ]; then
+    rm -rf "$BACKUP_DIR"
+    mkdir -p "$BACKUP_DIR"
+    cp -r "$INSTALL_DIR/scripts" "$BACKUP_DIR/scripts" 2>/dev/null || true
+    cp "$INSTALL_DIR/.version" "$BACKUP_DIR/.version" 2>/dev/null || true
+    log "  Backup saved for rollback"
+fi
 
 # ── Copy ALL tarball contents — preserve existing config ─────────────────────
-# Future-proof: any new file in the tarball automatically lands on the console.
-# Only config.cfg and dev-only files are excluded.
 log "Copying files..."
+
+# Backup user config
+cp "$INSTALL_DIR/config.cfg" /tmp/outbreak-config-backup.cfg 2>/dev/null || true
+
+# Copy everything from the tarball
 rsync -a \
     --exclude="config.cfg" \
     --exclude=".git" \
@@ -145,64 +187,88 @@ rsync -a \
     --exclude=".github/" \
     --exclude="patches/" \
     "$EXTRACTED/" "$INSTALL_DIR/" 2>/dev/null || {
-    # Fallback if rsync unavailable: backup config, copy all, restore config
+    # Fallback if rsync unavailable
     log "  rsync not available — using cp fallback"
-    [ -f "$INSTALL_DIR/config.cfg" ] && cp "$INSTALL_DIR/config.cfg" /tmp/outbreak-config-backup.cfg
     cp -r "$EXTRACTED/." "$INSTALL_DIR/"
-    [ -f /tmp/outbreak-config-backup.cfg ] && cp /tmp/outbreak-config-backup.cfg "$INSTALL_DIR/config.cfg"
-    # Remove dev-only files that shouldn't be on consoles
-    rm -f "$INSTALL_DIR/Dockerfile" "$INSTALL_DIR/docker-compose.yml" "$INSTALL_DIR/pyproject.toml" 2>/dev/null
-    rm -rf "$INSTALL_DIR/.github" "$INSTALL_DIR/tests" "$INSTALL_DIR/relay" "$INSTALL_DIR/patches" 2>/dev/null
+    # Restore config
+    [ -f /tmp/outbreak-config-backup.cfg ] && \
+        cp /tmp/outbreak-config-backup.cfg "$INSTALL_DIR/config.cfg"
+    # Remove dev-only files
+    rm -f "$INSTALL_DIR/Dockerfile" "$INSTALL_DIR/docker-compose.yml" \
+          "$INSTALL_DIR/pyproject.toml" 2>/dev/null
+    rm -rf "$INSTALL_DIR/.github" "$INSTALL_DIR/tests" \
+           "$INSTALL_DIR/relay" "$INSTALL_DIR/patches" 2>/dev/null
     rm -f "$INSTALL_DIR/"*.md 2>/dev/null
 }
 
 chmod +x "$INSTALL_DIR/scripts/"*.sh "$INSTALL_DIR/scripts/service" 2>/dev/null || true
 
-# Post-copy verification — warn if expected files are missing
-for _check_file in scripts/netplay-server.py scripts/boot.sh ui/index.html; do
-    [ ! -f "$INSTALL_DIR/$_check_file" ] && log "WARNING: $_check_file missing after install"
+# ── Post-copy verification — FAIL if critical files are missing ───────────────
+_install_ok=true
+for _check_file in scripts/netplay-server.py scripts/boot.sh scripts/setup.sh \
+                   scripts/netplay-broadcast.sh scripts/rom-checker.sh ui/index.html; do
+    if [ ! -f "$INSTALL_DIR/$_check_file" ]; then
+        log "ERROR: Critical file $_check_file missing after copy!"
+        _install_ok=false
+    fi
 done
-[ -f "$EXTRACTED/n64_compat.json" ] && [ ! -f "$INSTALL_DIR/n64_compat.json" ] && \
-    log "WARNING: n64_compat.json missing after install"
 
-rm -rf "$TMP_DIR"
+if [ "$_install_ok" != "true" ]; then
+    log "FATAL: Install verification failed. Rolling back..."
+    if [ -d "$BACKUP_DIR/scripts" ]; then
+        cp -r "$BACKUP_DIR/scripts/." "$INSTALL_DIR/scripts/"
+        [ -f "$BACKUP_DIR/.version" ] && cp "$BACKUP_DIR/.version" "$INSTALL_DIR/.version"
+        log "  Rollback complete — previous version restored"
+    fi
+    rm -rf "$TMP_DIR" "$BACKUP_DIR"
+    exit 1
+fi
 
-# ── Write version stamp and start server ─────────────────────────────────────
+# Verify optional new files (warn but don't fail)
+for _opt_file in scripts/gopher64-launch.sh n64_compat.json; do
+    [ -f "$EXTRACTED/$_opt_file" ] && [ ! -f "$INSTALL_DIR/$_opt_file" ] && \
+        log "WARNING: Optional file $_opt_file missing after copy"
+done
+
+log "All critical files verified."
+rm -rf "$TMP_DIR" "$BACKUP_DIR"
+
+# ── Write version stamp ──────────────────────────────────────────────────────
 echo "$LATEST_TAG" > "$INSTALL_DIR/VERSION"
 echo "$LATEST_TAG" > "$INSTALL_DIR/.version"
 log "Version stamped: $LATEST_TAG"
 
-# Run setup (per-core overrides, ES system entries, etc.) then boot the daemon
+# ── Start the server ─────────────────────────────────────────────────────────
 log "Starting boot.sh install..."
 bash "$INSTALL_DIR/scripts/boot.sh" install "${LATEST_TAG:-}"
 
-# Verify the new daemon is running
-sleep 3
-if [ -f "$MASTER_PID_FILE" ]; then
-    _new_pid=$(cat "$MASTER_PID_FILE" 2>/dev/null)
-    if [ -n "$_new_pid" ] && kill -0 "$_new_pid" 2>/dev/null; then
-        log "Outbreak $LATEST_TAG running (PID $_new_pid)"
-    else
-        log "WARNING: PID file exists but process not running. Retrying boot..."
-        rm -f "$MASTER_PID_FILE" /tmp/outbreak_boot.lock
-        bash "$INSTALL_DIR/scripts/boot.sh" boot >> "$INSTALL_DIR/logs/server.log" 2>&1 </dev/null &
-        sleep 3
-        if [ -f "$MASTER_PID_FILE" ] && kill -0 "$(cat "$MASTER_PID_FILE")" 2>/dev/null; then
-            log "Outbreak $LATEST_TAG running (PID $(cat "$MASTER_PID_FILE"))"
-        else
-            log "ERROR: Server failed to start. Check $INSTALL_DIR/logs/server.log"
-        fi
+# ── Health check — verify the server is actually responding ──────────────────
+log "Running health check..."
+_healthy=false
+for _attempt in 1 2 3 4 5 6; do
+    sleep 2
+    if curl -sf http://localhost:8765/status >/dev/null 2>&1; then
+        _healthy=true
+        break
     fi
+done
+
+if [ "$_healthy" = "true" ]; then
+    _running_ver=$(curl -sf http://localhost:8765/status 2>/dev/null \
+        | python3 -c "import json,sys; print(json.load(sys.stdin).get('version','?'))" 2>/dev/null || echo "?")
+    log "Outbreak $_running_ver is running and healthy."
 else
-    log "WARNING: No PID file after install. Retrying boot..."
-    rm -f /tmp/outbreak_boot.lock
-    bash "$INSTALL_DIR/scripts/boot.sh" boot >> "$INSTALL_DIR/logs/server.log" 2>&1 </dev/null &
-    sleep 3
-    if [ -f "$MASTER_PID_FILE" ] && kill -0 "$(cat "$MASTER_PID_FILE")" 2>/dev/null; then
-        log "Outbreak $LATEST_TAG running (PID $(cat "$MASTER_PID_FILE"))"
+    log "WARNING: Server not responding after 12 seconds."
+    log "  Attempting direct boot..."
+    rm -f /tmp/outbreak_boot.lock "$MASTER_PID_FILE"
+    nohup bash "$INSTALL_DIR/scripts/boot.sh" boot >> /tmp/netplay-arcade.log 2>&1 </dev/null &
+    sleep 5
+    if curl -sf http://localhost:8765/status >/dev/null 2>&1; then
+        log "Outbreak running after retry."
     else
-        log "ERROR: Server failed to start. Check $INSTALL_DIR/logs/server.log"
+        log "ERROR: Server failed to start. Check /tmp/netplay-arcade.log"
     fi
 fi
 
-log "Install log saved to $LOG"
+log ""
+log "Install complete. Log saved to $LOG"
