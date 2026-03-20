@@ -11,12 +11,16 @@
 set -e
 
 DIST_REPO="paulrenzi/ob-dist"
-INSTALL_DIR="/userdata/system/netplay-arcade"
+INSTALL_DIR="/userdata/system/outbreak"
+LEGACY_DIR="/userdata/system/netplay-arcade"
 TMP_DIR=$(mktemp -d)
 LOG="/tmp/outbreak-install.log"
 MASTER_PID_FILE="/tmp/outbreak_master.pid"
 
 log() { echo "[$(date '+%H:%M:%S')] $1" | tee -a "$LOG"; }
+
+# Catch unexpected failures so the user always sees an error message
+trap '_rc=$?; if [ $_rc -ne 0 ]; then echo ""; echo "ERROR: Installer failed (exit code $_rc)"; echo "Check /tmp/outbreak-install.log for details"; echo "Common fixes: verify WiFi is connected, then try again"; fi' EXIT
 
 log ""
 log "=== Outbreak installer ==="
@@ -25,7 +29,7 @@ log ""
 # ── Batocera version check ─────────────────────────────────────────────────────
 _BATOCERA_VER_FILE="/usr/share/batocera/batocera.version"
 if [ -f "$_BATOCERA_VER_FILE" ]; then
-    _BATOCERA_VER=$(cat "$_BATOCERA_VER_FILE" | tr -d '[:alpha:][:space:]' | cut -d'.' -f1)
+    _BATOCERA_VER=$(sed 's/[^0-9].*//' "$_BATOCERA_VER_FILE")
     if [ -n "$_BATOCERA_VER" ] && [ "$_BATOCERA_VER" -lt 38 ] 2>/dev/null; then
         log "ERROR: Outbreak requires Batocera v38 or later."
         log "       Detected: $(cat "$_BATOCERA_VER_FILE")"
@@ -36,6 +40,22 @@ if [ -f "$_BATOCERA_VER_FILE" ]; then
 elif [ ! -d "/userdata" ]; then
     log "WARNING: This doesn't look like a Batocera system (/userdata not found)."
     log "         Continuing anyway — some features may not work."
+fi
+
+# ── Migrate legacy install path ──────────────────────────────────────────────
+# Versions prior to v2.8 installed to /userdata/system/netplay-arcade/.
+# Move everything to the new canonical path.
+if [ -d "$LEGACY_DIR" ] && [ ! -d "$INSTALL_DIR" ]; then
+    log "Migrating $LEGACY_DIR → $INSTALL_DIR ..."
+    mv "$LEGACY_DIR" "$INSTALL_DIR"
+elif [ -d "$LEGACY_DIR" ] && [ -d "$INSTALL_DIR" ]; then
+    log "Cleaning up legacy $LEGACY_DIR (new path already exists)..."
+    rm -rf "$LEGACY_DIR"
+fi
+# Update custom.sh boot hook to use new path
+if [ -f /userdata/system/custom.sh ] && grep -q "netplay-arcade" /userdata/system/custom.sh 2>/dev/null; then
+    sed -i 's|netplay-arcade|outbreak|g' /userdata/system/custom.sh
+    log "  Updated custom.sh boot hook"
 fi
 
 # ── Resolve latest VERSIONED release from ob-dist ─────────────────────────────
@@ -145,6 +165,23 @@ rm -f /tmp/netplay_bootscan.lock /tmp/outbreak_boot.lock \
       /tmp/outbreak_joining.flag \
       "$MASTER_PID_FILE" 2>/dev/null || true
 
+# Step 4: Resume ES if it was suspended for Gopher64.
+# Killing gopher64 above without resuming ES leaves the display dead —
+# the wrapper is alive but ES binary is gone and won't restart without
+# a resume signal.
+if [ -p /tmp/es-resume.fifo ]; then
+    log "  ES was suspended — resuming"
+    # Restart triggerhappy first (Gopher64 kills it for SDL3 input)
+    /etc/init.d/S292triggerhappy start 2>/dev/null || \
+        /usr/sbin/thd --daemon --triggers /etc/triggerhappy/triggers.d/multimedia_keys.conf \
+            --socket /var/run/thd.socket --pidfile /var/run/thd.pid /dev/input/event* 2>/dev/null
+    # Clear suspend flag if present
+    rm -f /tmp/suspend.please 2>/dev/null || true
+    # Write to FIFO to unblock the wrapper
+    echo "resume" > /tmp/es-resume.fifo 2>/dev/null || true
+    sleep 2
+fi
+
 log "Previous processes stopped."
 
 # ── Force fresh ROM scan on version change (preserves ROM files) ──────────────
@@ -153,6 +190,8 @@ _PREV_VER=""
 if [ "$_PREV_VER" != "${LATEST_TAG:-}" ]; then
     log "  Version change ($_PREV_VER -> $LATEST_TAG) — clearing scan cache"
     rm -f /tmp/rom_scan_last_run 2>/dev/null || true
+    # Gopher64 binary updates are now handled by timestamp-based cache
+    # validation in netplay-cores.sh — no pin clearing needed here.
     # NOTE: .mame_blacklist and .console_blacklist are NOT cleared — they
     # represent persistent IA unavailability, not version-specific state.
     # NOTE: ROM files and pack markers are NEVER touched by the installer.
@@ -261,12 +300,12 @@ else
     log "WARNING: Server not responding after 12 seconds."
     log "  Attempting direct boot..."
     rm -f /tmp/outbreak_boot.lock "$MASTER_PID_FILE"
-    nohup bash "$INSTALL_DIR/scripts/boot.sh" boot >> /tmp/netplay-arcade.log 2>&1 </dev/null &
+    nohup bash "$INSTALL_DIR/scripts/boot.sh" boot >> /tmp/outbreak.log 2>&1 </dev/null &
     sleep 5
     if curl -sf http://localhost:8765/status >/dev/null 2>&1; then
         log "Outbreak running after retry."
     else
-        log "ERROR: Server failed to start. Check /tmp/netplay-arcade.log"
+        log "ERROR: Server failed to start. Check /tmp/outbreak.log"
     fi
 fi
 
