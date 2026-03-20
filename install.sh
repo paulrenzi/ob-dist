@@ -134,8 +134,19 @@ if [ -f "$_SCAN_STATE" ]; then
             while kill -0 "$_dl_pid" 2>/dev/null; do
                 sleep 5
             done
-            log "  Download finished — continuing install"
+            log "  Download finished"
         fi
+    fi
+    # Re-check: download may have transitioned to extracting
+    _dl_phase=$(python3 -c "import json,sys; d=json.load(open('$_SCAN_STATE')); print(d.get('phase',''))" 2>/dev/null)
+    if [ "$_dl_phase" = "extracting" ]; then
+        log "  Pack extraction in progress — waiting..."
+        while true; do
+            sleep 5
+            _dl_phase=$(python3 -c "import json,sys; d=json.load(open('$_SCAN_STATE')); print(d.get('phase',''))" 2>/dev/null)
+            [ "$_dl_phase" = "extracting" ] || break
+        done
+        log "  Extraction finished — continuing install"
     fi
 fi
 
