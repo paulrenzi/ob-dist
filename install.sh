@@ -177,8 +177,11 @@ if [ -p /tmp/es-resume.fifo ]; then
             --socket /var/run/thd.socket --pidfile /var/run/thd.pid /dev/input/event* 2>/dev/null
     # Clear suspend flag if present
     rm -f /tmp/suspend.please 2>/dev/null || true
-    # Write to FIFO to unblock the wrapper
-    echo "resume" > /tmp/es-resume.fifo 2>/dev/null || true
+    # Write to FIFO to unblock the wrapper (timeout prevents hang on stale FIFO)
+    timeout 2 bash -c 'echo "resume" > /tmp/es-resume.fifo' 2>/dev/null || {
+        log "  FIFO write timed out (stale) — removing"
+        rm -f /tmp/es-resume.fifo 2>/dev/null || true
+    }
     sleep 2
 fi
 
