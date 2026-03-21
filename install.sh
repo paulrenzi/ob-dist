@@ -333,7 +333,7 @@ else
     log "WARNING: Server not responding after 12 seconds."
     log "  Attempting direct boot..."
     rm -f /tmp/outbreak_boot.lock "$MASTER_PID_FILE"
-    nohup bash "$INSTALL_DIR/scripts/boot.sh" boot >> /tmp/outbreak.log 2>&1 </dev/null &
+    nohup bash "$INSTALL_DIR/scripts/boot.sh" boot install >> /tmp/outbreak.log 2>&1 </dev/null &
     sleep 5
     if curl -sf http://localhost:8765/status >/dev/null 2>&1; then
         log "Outbreak running after retry."
