@@ -122,22 +122,22 @@ find "$EXTRACTED" -type f \( -name "*.sh" -o -name "*.py" -o -name "*.json" \
 # Kill children first so the parent's subprocess.run() returns immediately.
 log "Stopping any existing Outbreak processes..."
 
-# Guard: wait for active FBNeo pack download before killing anything.
-# The 4.7 GB download takes ~30 min and must not be interrupted.
+# Guard: kill active pack download (will restart on next boot scan) but wait
+# for extraction (killing mid-extract corrupts ROM files).
 _SCAN_STATE="$INSTALL_DIR/rom_scan_state.json"
 if [ -f "$_SCAN_STATE" ]; then
     _dl_phase=$(python3 -c "import json,sys; d=json.load(open('$_SCAN_STATE')); print(d.get('phase',''))" 2>/dev/null)
     if [ "$_dl_phase" = "downloading" ]; then
         _dl_pid=$(python3 -c "import json,sys; d=json.load(open('$_SCAN_STATE')); print(d.get('pid',0))" 2>/dev/null)
         if [ -n "$_dl_pid" ] && [ "$_dl_pid" != "0" ] && kill -0 "$_dl_pid" 2>/dev/null; then
-            log "  FBNeo pack download in progress (PID $_dl_pid) — waiting for it to finish..."
-            while kill -0 "$_dl_pid" 2>/dev/null; do
-                sleep 5
-            done
-            log "  Download finished"
+            log "  Killing active pack download (PID $_dl_pid) — will resume after update"
+            kill "$_dl_pid" 2>/dev/null
+            sleep 1
+            kill -9 "$_dl_pid" 2>/dev/null
+            rm -f /userdata/fbneo_pack.zip  # remove partial file
         fi
     fi
-    # Re-check: download may have transitioned to extracting
+    # Wait for extraction — killing mid-extract corrupts ROM files
     _dl_phase=$(python3 -c "import json,sys; d=json.load(open('$_SCAN_STATE')); print(d.get('phase',''))" 2>/dev/null)
     if [ "$_dl_phase" = "extracting" ]; then
         log "  Pack extraction in progress — waiting..."
