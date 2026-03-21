@@ -134,7 +134,7 @@ if [ -f "$_SCAN_STATE" ]; then
             kill "$_dl_pid" 2>/dev/null
             sleep 1
             kill -9 "$_dl_pid" 2>/dev/null
-            rm -f /userdata/fbneo_pack.zip  # remove partial file
+            rm -f /userdata/fbneo_pack.zip.part  # remove partial download (never touch final .zip)
         fi
     fi
     # Wait for extraction — killing mid-extract corrupts ROM files
