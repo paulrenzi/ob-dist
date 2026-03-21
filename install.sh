@@ -317,8 +317,10 @@ log "Running health check..."
 _healthy=false
 for _attempt in 1 2 3 4 5 6; do
     sleep 2
+    printf "\r  Waiting for server... %d/6" "$_attempt" >&2
     if curl -sf http://localhost:8765/status >/dev/null 2>&1; then
         _healthy=true
+        printf "\r                              \r" >&2
         break
     fi
 done
