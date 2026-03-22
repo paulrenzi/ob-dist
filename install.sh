@@ -151,9 +151,23 @@ if [ -f "$_SCAN_STATE" ]; then
 fi
 
 # Step 1: Kill child processes FIRST (wget, rom-checker, scraper, etc.)
+# Use --parent to target only children of the master daemon, not the installer itself.
+# pkill -f matches the full command line — without --parent it can match the
+# installer's own bash process (which contains these pattern strings in memory).
+_server_pid=""
+[ -f "$MASTER_PID_FILE" ] && _server_pid=$(cat "$MASTER_PID_FILE" 2>/dev/null)
+if [ -n "$_server_pid" ] && kill -0 "$_server_pid" 2>/dev/null; then
+    # Kill all children of the server process
+    pkill -9 -P "$_server_pid" 2>/dev/null || true
+fi
+# Also kill known detached processes by name (not children of server)
+_my_pid=$$
 for _pat in "wget.*archive.org" "wget.*github" rom-checker.sh media-scraper.py \
             cabinet-ui.py netplay-cores.sh gopher64; do
-    pkill -9 -f "$_pat" 2>/dev/null || true
+    pgrep -f "$_pat" 2>/dev/null | while read _pid; do
+        [ "$_pid" = "$_my_pid" ] && continue
+        kill -9 "$_pid" 2>/dev/null || true
+    done
 done
 sleep 0.5
 
@@ -183,7 +197,10 @@ if [ -f "$MASTER_PID_FILE" ]; then
 fi
 
 # Step 3: Final sweep — kill any remaining Python server processes
-pkill -9 -f netplay-server.py 2>/dev/null || true
+pgrep -f netplay-server.py 2>/dev/null | while read _pid; do
+    [ "$_pid" = "$_my_pid" ] && continue
+    kill -9 "$_pid" 2>/dev/null || true
+done
 sleep 0.5
 
 # Clear ALL lock files
