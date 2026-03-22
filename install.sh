@@ -151,14 +151,10 @@ if [ -f "$_SCAN_STATE" ]; then
 fi
 
 # Step 1: Kill child processes FIRST (wget, rom-checker, scraper, etc.)
-# Use -P to target only children of the master daemon.
-# NEVER use pkill/pgrep -f with pattern strings — the installer's own bash
-# process contains those strings in memory and will match, killing itself.
-_server_pid=""
-[ -f "$MASTER_PID_FILE" ] && _server_pid=$(cat "$MASTER_PID_FILE" 2>/dev/null)
-if [ -n "$_server_pid" ] && kill -0 "$_server_pid" 2>/dev/null; then
-    pkill -9 -P "$_server_pid" 2>/dev/null || true
-fi
+for _pat in "wget.*archive.org" "wget.*github" rom-checker.sh media-scraper.py \
+            cabinet-ui.py netplay-cores.sh gopher64; do
+    pkill -9 -f "$_pat" 2>/dev/null || true
+done
 sleep 0.5
 
 # Step 2: Now kill the master daemon (subprocess.run calls will have returned)
@@ -186,11 +182,8 @@ if [ -f "$MASTER_PID_FILE" ]; then
     rm -f "$MASTER_PID_FILE"
 fi
 
-# Step 3: Final sweep — kill any remaining server by PID file or direct match
-# Use pidof (matches executable name, not command line) to avoid self-kill.
-if [ -n "$_server_pid" ] && kill -0 "$_server_pid" 2>/dev/null; then
-    kill -9 "$_server_pid" 2>/dev/null || true
-fi
+# Step 3: Final sweep — kill any remaining Python server processes
+pkill -9 -f netplay-server.py 2>/dev/null || true
 sleep 0.5
 
 # Clear ALL lock files
