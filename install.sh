@@ -199,10 +199,12 @@ rm -f /tmp/netplay_bootscan.lock /tmp/outbreak_boot.lock \
 # a resume signal.
 if [ -p /tmp/es-resume.fifo ]; then
     log "  ES was suspended — resuming"
-    # Restart triggerhappy first (Gopher64 kills it for SDL3 input)
-    /etc/init.d/S292triggerhappy start 2>/dev/null || \
-        /usr/sbin/thd --daemon --triggers /etc/triggerhappy/triggers.d/multimedia_keys.conf \
-            --socket /var/run/thd.socket --pidfile /var/run/thd.pid /dev/input/event* 2>/dev/null
+    # Restart triggerhappy only if not already running (prevents duplicate daemon)
+    if ! pidof thd >/dev/null 2>&1; then
+        /etc/init.d/S292triggerhappy start 2>/dev/null || \
+            /usr/sbin/thd --daemon --triggers /etc/triggerhappy/triggers.d/multimedia_keys.conf \
+                --socket /var/run/thd.socket --pidfile /var/run/thd.pid /dev/input/event* 2>/dev/null
+    fi
     # Clear suspend flag if present
     rm -f /tmp/suspend.please 2>/dev/null || true
     # Write to FIFO to unblock the wrapper (timeout prevents hang on stale FIFO)
