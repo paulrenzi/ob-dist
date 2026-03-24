@@ -352,7 +352,7 @@ _bato_ver=""
 [ -f "$_BATOCERA_VER_FILE" ] && _bato_ver=$(cat "$_BATOCERA_VER_FILE" 2>/dev/null)
 curl -sf -X POST "https://relay.outbreakarcade.com/api/installs" \
     -H "Content-Type: application/json" \
-    -d "{\"version\":\"${LATEST_TAG}\",\"batocera\":\"${_bato_ver}\"}" \
+    -d "{\"version\":\"${LATEST_TAG}\",\"batocera\":\"${_bato_ver}\",\"event\":\"install\"}" \
     --connect-timeout 3 --max-time 5 >/dev/null 2>&1 || true
 
 log ""
