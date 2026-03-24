@@ -344,13 +344,16 @@ else
     fi
 fi
 
-# ── Report install to registry (non-blocking, fail-silent) ────────────────────
+# ── Report install to registry (single attempt, fail-silent) ──────────────────
+# Foreground so it completes before the script exits (background curl gets
+# killed when the parent shell terminates). Short timeouts prevent hanging.
+# No retries, no background processes, no persistent network activity.
 _bato_ver=""
 [ -f "$_BATOCERA_VER_FILE" ] && _bato_ver=$(cat "$_BATOCERA_VER_FILE" 2>/dev/null)
 curl -sf -X POST "https://relay.outbreakarcade.com/api/installs" \
     -H "Content-Type: application/json" \
     -d "{\"version\":\"${LATEST_TAG}\",\"batocera\":\"${_bato_ver}\"}" \
-    --connect-timeout 5 --max-time 10 >/dev/null 2>&1 &
+    --connect-timeout 3 --max-time 5 >/dev/null 2>&1 || true
 
 log ""
 log "Install complete. Log saved to $LOG"
