@@ -30,10 +30,24 @@ log ""
 _BATOCERA_VER_FILE="/usr/share/batocera/batocera.version"
 if [ -f "$_BATOCERA_VER_FILE" ]; then
     _BATOCERA_VER=$(sed 's/[^0-9].*//' "$_BATOCERA_VER_FILE")
-    if [ -n "$_BATOCERA_VER" ] && [ "$_BATOCERA_VER" -lt 38 ] 2>/dev/null; then
-        log "ERROR: Outbreak requires Batocera v38 or later."
-        log "       Detected: $(cat "$_BATOCERA_VER_FILE")"
-        log "       Please update Batocera first: batocera-upgrade"
+    if [ -n "$_BATOCERA_VER" ] && [ "$_BATOCERA_VER" -lt 41 ] 2>/dev/null; then
+        echo ""
+        echo "============================================"
+        echo "  Outbreak requires Batocera v41 or newer"
+        echo "============================================"
+        echo ""
+        echo "  Your version:  Batocera $(cat "$_BATOCERA_VER_FILE")"
+        echo "  Required:      Batocera 41+"
+        echo ""
+        echo "  How to update:"
+        echo "    1. Go to Main Menu > System Settings > Update"
+        echo "    2. Or run: batocera-upgrade"
+        echo "    3. Reboot, then run this installer again"
+        echo ""
+        echo "  Download latest: https://batocera.org/download"
+        echo "============================================"
+        echo ""
+        log "ERROR: Batocera $(cat "$_BATOCERA_VER_FILE") is too old. Need v41+."
         rm -rf "$TMP_DIR"
         exit 1
     fi
