@@ -109,6 +109,23 @@ curl -sfL "$TARBALL_URL" -o "$TMP_DIR/outbreak.tar.gz" || {
 }
 log "Download complete ($(du -h "$TMP_DIR/outbreak.tar.gz" | cut -f1))"
 
+# ── Verify SHA-256 checksum (if available) ───────────────────────────────────
+CHECKSUM_URL="https://github.com/$DIST_REPO/releases/download/$LATEST_TAG/outbreak-${LATEST_TAG}.tar.gz.sha256"
+if curl -sfL --max-time 15 "$CHECKSUM_URL" -o "$TMP_DIR/outbreak.tar.gz.sha256" 2>/dev/null; then
+    _expected_hash=$(awk '{print $1}' "$TMP_DIR/outbreak.tar.gz.sha256")
+    _actual_hash=$(sha256sum "$TMP_DIR/outbreak.tar.gz" | awk '{print $1}')
+    if [ "$_expected_hash" != "$_actual_hash" ]; then
+        log "ERROR: Checksum mismatch! Download may be corrupted."
+        log "  Expected: $_expected_hash"
+        log "  Got:      $_actual_hash"
+        rm -rf "$TMP_DIR"
+        exit 1
+    fi
+    log "Checksum verified ✓"
+else
+    log "No checksum file available — skipping verification"
+fi
+
 # ── Extract ───────────────────────────────────────────────────────────────────
 log "Extracting..."
 mkdir -p "$INSTALL_DIR"
@@ -244,85 +261,20 @@ if [ "$_PREV_VER" != "${LATEST_TAG:-}" ]; then
     # NOTE: ROM files and pack markers are NEVER touched by the installer.
 fi
 
-# ── Backup current install for rollback ───────────────────────────────────────
-BACKUP_DIR="/tmp/outbreak-rollback"
-if [ -d "$INSTALL_DIR/scripts" ]; then
-    rm -rf "$BACKUP_DIR"
-    mkdir -p "$BACKUP_DIR"
-    cp -r "$INSTALL_DIR/scripts" "$BACKUP_DIR/scripts" 2>/dev/null || true
-    cp "$INSTALL_DIR/.version" "$BACKUP_DIR/.version" 2>/dev/null || true
-    log "  Backup saved for rollback"
-fi
-
-# ── Copy ALL tarball contents — preserve existing config ─────────────────────
-log "Copying files..."
-
-# Backup user config
-cp "$INSTALL_DIR/config.cfg" /tmp/outbreak-config-backup.cfg 2>/dev/null || true
-
-# Copy everything from the tarball
-rsync -a \
-    --exclude="config.cfg" \
-    --exclude=".git" \
-    --exclude="tests/" \
-    --exclude="relay/" \
-    --exclude="*.md" \
-    --exclude="Dockerfile" \
-    --exclude="docker-compose.yml" \
-    --exclude="pyproject.toml" \
-    --exclude=".github/" \
-    --exclude="patches/" \
-    "$EXTRACTED/" "$INSTALL_DIR/" 2>/dev/null || {
-    # Fallback if rsync unavailable
-    log "  rsync not available — using cp fallback"
-    cp -r "$EXTRACTED/." "$INSTALL_DIR/"
-    # Restore config
-    [ -f /tmp/outbreak-config-backup.cfg ] && \
-        cp /tmp/outbreak-config-backup.cfg "$INSTALL_DIR/config.cfg"
-    # Remove dev-only files
-    rm -f "$INSTALL_DIR/Dockerfile" "$INSTALL_DIR/docker-compose.yml" \
-          "$INSTALL_DIR/pyproject.toml" 2>/dev/null
-    rm -rf "$INSTALL_DIR/.github" "$INSTALL_DIR/tests" \
-           "$INSTALL_DIR/relay" "$INSTALL_DIR/patches" 2>/dev/null
-    rm -f "$INSTALL_DIR/"*.md 2>/dev/null
-}
-
-chmod +x "$INSTALL_DIR/scripts/"*.sh "$INSTALL_DIR/scripts/service" 2>/dev/null || true
-
-# ── Post-copy verification — FAIL if critical files are missing ───────────────
-_install_ok=true
-for _check_file in scripts/netplay-server.py scripts/boot.sh scripts/setup.sh \
-                   scripts/netplay-broadcast.sh scripts/rom-checker.sh ui/index.html; do
-    if [ ! -f "$INSTALL_DIR/$_check_file" ]; then
-        log "ERROR: Critical file $_check_file missing after copy!"
-        _install_ok=false
-    fi
-done
-
-if [ "$_install_ok" != "true" ]; then
-    log "FATAL: Install verification failed. Rolling back..."
-    if [ -d "$BACKUP_DIR/scripts" ]; then
-        cp -r "$BACKUP_DIR/scripts/." "$INSTALL_DIR/scripts/"
-        [ -f "$BACKUP_DIR/.version" ] && cp "$BACKUP_DIR/.version" "$INSTALL_DIR/.version"
-        log "  Rollback complete — previous version restored"
-    fi
-    rm -rf "$TMP_DIR" "$BACKUP_DIR"
+# ── Atomic install via apply_update() ────────────────────────────────────────
+# Uses the same atomic mv-swap that regular updates use.  On first install,
+# there's no existing INSTALL_DIR so nothing to preserve — apply_update
+# handles this gracefully.  On reinstall/upgrade, config and cores are
+# automatically preserved.
+log "Applying update (atomic swap)..."
+bash "$EXTRACTED/scripts/setup.sh" apply-update "$EXTRACTED" "$LATEST_TAG"
+if [ $? -ne 0 ]; then
+    log "FATAL: apply-update failed."
+    rm -rf "$TMP_DIR"
     exit 1
 fi
-
-# Verify optional new files (warn but don't fail)
-for _opt_file in scripts/gopher64-launch.sh n64_compat.json; do
-    [ -f "$EXTRACTED/$_opt_file" ] && [ ! -f "$INSTALL_DIR/$_opt_file" ] && \
-        log "WARNING: Optional file $_opt_file missing after copy"
-done
-
-log "All critical files verified."
-rm -rf "$TMP_DIR" "$BACKUP_DIR"
-
-# ── Write version stamp ──────────────────────────────────────────────────────
-echo "$LATEST_TAG" > "$INSTALL_DIR/VERSION"
-echo "$LATEST_TAG" > "$INSTALL_DIR/.version"
-log "Version stamped: $LATEST_TAG"
+rm -rf "$TMP_DIR"
+log "Files installed: $LATEST_TAG"
 
 # ── Start the server ─────────────────────────────────────────────────────────
 log "Starting boot.sh install..."
