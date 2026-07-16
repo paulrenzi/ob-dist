@@ -75,13 +75,16 @@ fi
 # ── Resolve latest VERSIONED release from ob-dist ─────────────────────────────
 # Only match v* tags — prevents picking up non-version releases like
 # "standalone-x86_64" or "core-channel-x86_64" which are asset-only.
+# Skip prereleases: CI publishes every tag as --prerelease and they are promoted
+# to latest only after soak. A fresh install must land on the same soaked build
+# the auto-updater (which polls /releases/latest) would pick.
 LATEST_TAG=$(curl -sf "https://api.github.com/repos/$DIST_REPO/releases" \
     | python3 -c "
 import json, sys
 releases = json.load(sys.stdin)
 for r in releases:
     tag = r.get('tag_name', '')
-    if tag.startswith('v') and not r.get('draft', False):
+    if tag.startswith('v') and not r.get('draft', False) and not r.get('prerelease', False):
         print(tag)
         break
 " 2>/dev/null)
@@ -102,7 +105,17 @@ log "Installing Outbreak $LATEST_TAG"
 # ── Download tarball from release assets ──────────────────────────────────────
 TARBALL_URL="https://github.com/$DIST_REPO/releases/download/$LATEST_TAG/outbreak-${LATEST_TAG}.tar.gz"
 log "Downloading from $TARBALL_URL ..."
-curl -sfL "$TARBALL_URL" -o "$TMP_DIR/outbreak.tar.gz" || {
+# Same retry/resume policy as setup.sh's updater: a first install often runs on
+# the customer's hotspot, where a bare `curl -sfL` hard-fails on one blip and
+# takes the whole install with it. No --max-time: a slow link must not be a
+# failure, and --continue-at resumes rather than restarting the transfer.
+curl -sfL \
+    --connect-timeout 15 \
+    --retry 5 \
+    --retry-delay 3 \
+    --retry-all-errors \
+    --continue-at - \
+    "$TARBALL_URL" -o "$TMP_DIR/outbreak.tar.gz" || {
     log "ERROR: Download failed. Check your internet connection."
     rm -rf "$TMP_DIR"
     exit 1
