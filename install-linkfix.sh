@@ -36,7 +36,7 @@
 
 set -u
 
-PIN_TAG="v2.27.12-rc9-linkfix"
+PIN_TAG="v2.27.12-rc10-linkfix"
 DIST_REPO="paulrenzi/ob-dist"
 INSTALL_DIR="/userdata/system/outbreak"
 LINKCONF="/userdata/system/link.conf"
