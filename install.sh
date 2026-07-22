@@ -78,6 +78,14 @@ fi
 # Skip prereleases: CI publishes every tag as --prerelease and they are promoted
 # to latest only after soak. A fresh install must land on the same soaked build
 # the auto-updater (which polls /releases/latest) would pick.
+# OUTBREAK_PIN_TAG pins this run to one exact release and skips resolution
+# entirely. It exists so a targeted installer (see install-linkfix.sh) can ship a
+# PRERELEASE to ONE console that needs it, without that tag being reachable by
+# anyone running the public one-liner. Never default this.
+if [ -n "${OUTBREAK_PIN_TAG:-}" ]; then
+    LATEST_TAG="$OUTBREAK_PIN_TAG"
+    log "Pinned to $LATEST_TAG (targeted install — not the public channel)"
+else
 LATEST_TAG=$(curl -sf "https://api.github.com/repos/$DIST_REPO/releases" \
     | python3 -c "
 import json, sys
@@ -100,6 +108,7 @@ if [ -z "$LATEST_TAG" ]; then
     rm -rf "$TMP_DIR"
     exit 1
 fi
+fi
 log "Installing Outbreak $LATEST_TAG"
 
 # ── Download tarball from release assets ──────────────────────────────────────
@@ -109,28 +118,54 @@ log "Downloading from $TARBALL_URL ..."
 # the customer's hotspot, where a bare `curl -sfL` hard-fails on one blip and
 # takes the whole install with it. No --max-time: a slow link must not be a
 # failure, and --continue-at resumes rather than restarting the transfer.
-curl -sfL \
-    --connect-timeout 15 \
-    --retry 5 \
-    --retry-delay 3 \
-    --retry-all-errors \
-    --continue-at - \
-    "$TARBALL_URL" -o "$TMP_DIR/outbreak.tar.gz" || {
-    log "ERROR: Download failed. Check your internet connection."
+#
+# RESUME NEEDS A STABLE PATH ACROSS RUNS. TMP_DIR is `mktemp -d`, a fresh random
+# directory every invocation, so --continue-at had nothing to continue FROM: each
+# re-run silently restarted at byte zero. On a link that drops every few minutes
+# that is the difference between converging and never finishing. Cache under
+# /userdata (persistent, survives reboot), keyed by tag.
+DL_DIR="/userdata/system/.outbreak-dl"
+mkdir -p "$DL_DIR"
+DL_FILE="$DL_DIR/outbreak-${LATEST_TAG}.tar.gz"
+# A partial for any OTHER tag is dead weight on a small disk.
+find "$DL_DIR" -maxdepth 1 -name 'outbreak-*.tar.gz' ! -name "$(basename "$DL_FILE")" -delete 2>/dev/null || true
+_dl_ok=false
+for _try in 1 2 3 4 5; do
+    [ "$_try" -gt 1 ] && log "  Download interrupted — resuming (attempt $_try/5)..."
+    if curl -fL \
+        --connect-timeout 20 \
+        --retry 5 \
+        --retry-delay 3 \
+        --retry-all-errors \
+        --speed-limit 1024 --speed-time 60 \
+        --continue-at - \
+        --progress-bar \
+        "$TARBALL_URL" -o "$DL_FILE"; then
+        _dl_ok=true
+        break
+    fi
+    sleep 5
+done
+if [ "$_dl_ok" != "true" ]; then
+    log "ERROR: Download failed after 5 attempts. Check your internet connection."
+    log "       Partial download kept — re-running this installer will resume it."
     rm -rf "$TMP_DIR"
     exit 1
-}
-log "Download complete ($(du -h "$TMP_DIR/outbreak.tar.gz" | cut -f1))"
+fi
+log "Download complete ($(du -h "$DL_FILE" | cut -f1))"
 
 # ── Verify SHA-256 checksum (if available) ───────────────────────────────────
 CHECKSUM_URL="https://github.com/$DIST_REPO/releases/download/$LATEST_TAG/outbreak-${LATEST_TAG}.tar.gz.sha256"
 if curl -sfL --max-time 15 "$CHECKSUM_URL" -o "$TMP_DIR/outbreak.tar.gz.sha256" 2>/dev/null; then
     _expected_hash=$(awk '{print $1}' "$TMP_DIR/outbreak.tar.gz.sha256")
-    _actual_hash=$(sha256sum "$TMP_DIR/outbreak.tar.gz" | awk '{print $1}')
+    _actual_hash=$(sha256sum "$DL_FILE" | awk '{print $1}')
     if [ "$_expected_hash" != "$_actual_hash" ]; then
         log "ERROR: Checksum mismatch! Download may be corrupted."
         log "  Expected: $_expected_hash"
         log "  Got:      $_actual_hash"
+        # Discard it: a bad cached file would otherwise be RESUMED forever,
+        # failing identically on every retry.
+        rm -f "$DL_FILE"
         rm -rf "$TMP_DIR"
         exit 1
     fi
@@ -142,7 +177,7 @@ fi
 # ── Extract ───────────────────────────────────────────────────────────────────
 log "Extracting..."
 mkdir -p "$INSTALL_DIR"
-tar xzf "$TMP_DIR/outbreak.tar.gz" -C "$TMP_DIR"
+tar xzf "$DL_FILE" -C "$TMP_DIR"
 
 EXTRACTED=$(find "$TMP_DIR" -maxdepth 1 -type d -name "*Outbreak*" | head -1)
 if [ -z "$EXTRACTED" ]; then
@@ -195,8 +230,11 @@ if [ -f "$_SCAN_STATE" ]; then
 fi
 
 # Step 1: Kill child processes FIRST (wget, rom-checker, scraper, etc.)
+# tunnel-watchdog.sh / dbclient added 2026-07-22: the watchdog is not reliably
+# the master's child, so killing the master in Step 2 can reparent it to init and
+# leave a reconnect loop competing for the radio straight through the install.
 for _pat in "wget.*archive.org" "wget.*github" rom-checker.sh media-scraper.py \
-            cabinet-ui.py netplay-cores.sh gopher64; do
+            cabinet-ui.py netplay-cores.sh gopher64 tunnel-watchdog.sh dbclient; do
     pkill -9 -f "$_pat" 2>/dev/null || true
 done
 sleep 0.5
@@ -287,6 +325,8 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 rm -rf "$TMP_DIR"
+# The resume cache has done its job — reclaim the space.
+rm -f "$DL_FILE"
 log "Files installed: $LATEST_TAG"
 
 # ── Start the server ─────────────────────────────────────────────────────────
