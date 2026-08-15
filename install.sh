@@ -4,8 +4,25 @@
 #
 # Paste into a Batocera terminal or SSH session:
 #
-#   curl -sL https://tinyurl.com/2ck7b59j | bash
+#   curl -fsSL https://raw.githubusercontent.com/paulrenzi/ob-dist/main/install.sh | bash
 #
+# NO SHORTENER, AND NOTHING TO REDIRECT TO. Both halves are load-bearing, and
+# both were learned from one customer on 2026-08-14 who could not get the old
+# command to run and needed 30 minutes on the phone:
+#
+#   tinyurl.com -> timyurl.com   a one-character typo that resolves, to a
+#                                squatter that answers HTTP 200 with the body
+#                                "Redirecting". `curl -f` sees success and pipes
+#                                that into bash, which does nothing and says
+#                                nothing. A raw.githubusercontent.com typo 404s
+#                                or does not resolve, so -f catches it.
+#   -sL -> -sl                   lowercase L is not an error, it just stops curl
+#                                following redirects -- fatal for a shortener,
+#                                which IS a redirect. This URL is the file, so
+#                                the typo now costs nothing.
+#
+# Keep this identical to the copy on docs/index.html, docs/setup.html and the
+# repo README. Four copies, one string.
 # =============================================================================
 
 set -e
